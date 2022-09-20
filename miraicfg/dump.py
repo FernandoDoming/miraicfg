@@ -9,6 +9,7 @@ import traceback
 
 from .utils.cmdline import green, red
 
+logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("miraicfg.main")
 log.setLevel(logging.INFO)
 
