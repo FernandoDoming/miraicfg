@@ -28,6 +28,11 @@ def main():
         action = "store_true"
     )
     parser.add_argument(
+        "--no-stats",
+        help = "Do not print configuration dumping stats at the end of the execution",
+        action = "store_true"
+    )
+    parser.add_argument(
         "-o", "--output",
         help = "Output file (default: stdout)",
         default = None
@@ -51,6 +56,27 @@ def main():
             f.write(json.dumps(configs, indent=4))
     else:
         print(json.dumps(configs, indent=4))
+
+    if not args.no_stats:
+        nsuccess, nerrors = 0, 0
+        nfiles = len(args.files)
+        for sha256, config in configs.items():
+            if config and (
+                config.get("cnc") or config.get("strings_table") or config.get("key")
+            ):
+                nsuccess += 1
+            else:
+                nerrors += 1
+
+        print(green("[+]") + " Execution statistics:")
+        print(green("[+]") + f" Processed {nfiles} files")
+        print(
+            "\tConfig extracted: " +
+            green(nsuccess) +
+            "\tFailed to extract: " +
+            red(nerrors) +
+            f"\tSuccess ratio: {(nsuccess / float(nfiles) * 100):.2f}%"
+        )
 
 # ---------------------------------------------------
 def identify_mirai_enc_fns(r2):
@@ -115,7 +141,7 @@ def identify_mirai_table_init_fn(r2):
 # ---------------------------------------------------
 def dump_mirai(fpath):
     cfg = {}
-    r2 = r2pipe.open(fpath)
+    r2 = r2pipe.open(fpath, flags=["-2"])
     r2.use_cache = True
     r2.cmd("aaaa")
     enc_fns = identify_mirai_enc_fns(r2)
