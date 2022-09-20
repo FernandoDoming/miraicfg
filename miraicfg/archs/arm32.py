@@ -3,6 +3,7 @@ import logging
 import traceback
 import ipaddress
 import re
+from magic import Magic
 from .common import decode
 
 logging.basicConfig(level=logging.INFO)
@@ -11,7 +12,7 @@ log = logging.getLogger("miraicfg.main")
 # ---------------------------------------------------
 #                         ARM32                     |
 # ---------------------------------------------------
-def extract_enc_values_arm32(r2, enc_fn):
+def extract_enc_values_arm32(fpath, r2, enc_fn):
     table_base, key = None, None
 
     try:
@@ -24,7 +25,8 @@ def extract_enc_values_arm32(r2, enc_fn):
                 i["opex"]["operands"][1]["type"] == "mem" and
                 i["opex"]["operands"][1]["disp"] != 0
             ):
-                table_base = i["opex"]["operands"][1]["disp"]
+                table_base = i["addr"] + i["opex"]["operands"][1]["disp"] + 8
+                log.debug("table base: %x", table_base)
                 continue
 
             if (
@@ -35,14 +37,23 @@ def extract_enc_values_arm32(r2, enc_fn):
                 i["opex"]["operands"][1]["base"] == "pc"
             ):
                 key_ptr_ptr = i["addr"] + 8 + i["opex"]["operands"][1]["disp"]
+                log.debug("key_ptr_ptr: %x", key_ptr_ptr)
                 key_ptr = bytes(r2.cmdj(f"pxj 4 @ {key_ptr_ptr}"))
                 # Parse as little-endian 32 bit unsinged int
                 key_ptr = struct.unpack("<I", key_ptr)[0]
-                # I think the +4 in the line below is a r2 bug
-                # however it may be, the addr read previously needs to be
-                # offsetted by +4 to read the correct key in r2 (but not in IDA)
-                key = bytes(r2.cmdj(f"pxj 4 @ {key_ptr + 4}"))
+                log.debug("key_ptr: %x", key_ptr)
+
+                # It looks like ARM32 EABI4 is bugger in r2
+                # and the data is offseted by 4 in certain sections
+                # so we correct it in such case
+                m = Magic()
+                filetype = m.from_file(fpath)
+                if "EABI4" in filetype:
+                    key_ptr = key_ptr + 4
+
+                key = bytes(r2.cmdj(f"pxj 4 @ {key_ptr}"))
                 key = struct.unpack("<I", key)[0]
+                log.debug("key: %x", key)
                 break
     except:
         log.exception("Exception extracting key from %s", enc_fn["name"])

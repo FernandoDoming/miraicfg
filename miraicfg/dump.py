@@ -92,13 +92,15 @@ def identify_mirai_enc_fns(r2):
                 fn["nargs"] == 1 and
                 # does not call fns
                 fn["outdegree"] == 0 and
+                fn["nbbs"] > 1 and
                 # gets called a lot
                 fn["indegree"] >= 5 and
                 (fn["is-pure"] == "false" or not fn["is-pure"]) and
                 # the argument is an integer
-                re.match(r"[\w\.]+ \(int[\w]+ \w+\);", fn["signature"])
+                re.match(r"[\w\.]+ ?\(int[\w]+ \w+\);", fn["signature"])
             ):
             candidate = fn
+            log.debug("Found first encryption candidate function: %s", fn["name"])
             continue
 
         if (
@@ -108,12 +110,14 @@ def identify_mirai_enc_fns(r2):
             # the rest of features are the same as well
             fn["nargs"] == 1 and
             fn["outdegree"] == 0 and
+            fn["nbbs"] > 1 and
             fn["indegree"] >= 5 and
             (fn["is-pure"] == "false" or not fn["is-pure"]) and
             re.match(r"[\w\.]+ \(int[\w]+ \w+\);", fn["signature"])
         ):
             enc_fns.append(candidate)
             enc_fns.append(fn)
+            log.debug("Found duplicated encryption function: %s", fn["name"])
             break
 
     return enc_fns
@@ -152,7 +156,7 @@ def dump_mirai(fpath):
         )
         return None
 
-    log.info(
+    log.debug(
         "%s: Mirai's encryption function found: %s, %s",
         fpath, enc_fns[0]['name'], enc_fns[1]['name']
     )
@@ -161,7 +165,7 @@ def dump_mirai(fpath):
         log.warning("%s: Could not find Mirai's table_init function", fpath)
         return None
 
-    log.info("%s: table_init found: %s", fpath, table_init['name'])
+    log.debug("%s: table_init found: %s", fpath, table_init['name'])
 
     bininfo = r2.cmdj("ij")
     arch = bininfo.get("bin", {}).get("arch")
@@ -177,7 +181,7 @@ def dump_mirai(fpath):
     # ARM32
     elif arch == "arm" and bininfo.get("bin", {}).get("bits") == 32:
         cfg["cnc"] = extract_cnc_arm32(r2)
-        table_base, key = extract_enc_values_arm32(r2, enc_fns[0])
+        table_base, key = extract_enc_values_arm32(fpath, r2, enc_fns[0])
         cfg["key"] = key
         if key:
             cfg["strings_table"] = decrypt_table_arm32(r2, table_init, key)
