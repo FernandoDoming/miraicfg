@@ -1,6 +1,7 @@
 import struct
 import logging
 import traceback
+import ipaddress
 from .common import decode
 
 logging.basicConfig(level=logging.INFO)
@@ -10,37 +11,40 @@ log = logging.getLogger("miraicfg.main")
 #                         ARM32                     |
 # ---------------------------------------------------
 def extract_enc_values_arm32(r2, enc_fn):
-    table_base = None
-    key = None
-    instrs = r2.cmdj(f"aoj {enc_fn['ninstrs']} @ {enc_fn['offset']}")
-    for i in instrs:
-        if (
-            not table_base and
-            i["mnemonic"] == "ldr" and
-            len(i["opex"]["operands"]) == 2 and
-            i["opex"]["operands"][1]["type"] == "mem" and
-            i["opex"]["operands"][1]["disp"] != 0
-        ):
-            table_base = i["opex"]["operands"][1]["disp"]
-            continue
+    table_base, key = None, None
 
-        if (
-            table_base and
-            i["mnemonic"] == "ldr" and
-            len(i["opex"]["operands"]) == 2 and
-            i["opex"]["operands"][1]["type"] == "mem" and
-            i["opex"]["operands"][1]["base"] == "pc"
-        ):
-            key_ptr_ptr = i["addr"] + 8 + i["opex"]["operands"][1]["disp"]
-            key_ptr = bytes(r2.cmdj(f"pxj 4 @ {key_ptr_ptr}"))
-            # Parse as little-endian 32 bit unsinged int
-            key_ptr = struct.unpack("<I", key_ptr)[0]
-            # I think the +4 in the line below is a r2 bug
-            # however it may be, the addr read previously needs to be
-            # offsetted by +4 to read the correct key in r2 (but not in IDA)
-            key = bytes(r2.cmdj(f"pxj 4 @ {key_ptr + 4}"))
-            key = struct.unpack("<I", key)[0]
-            break
+    try:
+        instrs = r2.cmdj(f"aoj {enc_fn['ninstrs']} @ {enc_fn['offset']}")
+        for i in instrs:
+            if (
+                not table_base and
+                i["mnemonic"] == "ldr" and
+                len(i["opex"]["operands"]) == 2 and
+                i["opex"]["operands"][1]["type"] == "mem" and
+                i["opex"]["operands"][1]["disp"] != 0
+            ):
+                table_base = i["opex"]["operands"][1]["disp"]
+                continue
+
+            if (
+                table_base and
+                i["mnemonic"] == "ldr" and
+                len(i["opex"]["operands"]) == 2 and
+                i["opex"]["operands"][1]["type"] == "mem" and
+                i["opex"]["operands"][1]["base"] == "pc"
+            ):
+                key_ptr_ptr = i["addr"] + 8 + i["opex"]["operands"][1]["disp"]
+                key_ptr = bytes(r2.cmdj(f"pxj 4 @ {key_ptr_ptr}"))
+                # Parse as little-endian 32 bit unsinged int
+                key_ptr = struct.unpack("<I", key_ptr)[0]
+                # I think the +4 in the line below is a r2 bug
+                # however it may be, the addr read previously needs to be
+                # offsetted by +4 to read the correct key in r2 (but not in IDA)
+                key = bytes(r2.cmdj(f"pxj 4 @ {key_ptr + 4}"))
+                key = struct.unpack("<I", key)[0]
+                break
+    except:
+        log.exception("Exception extracting key from %s", enc_fn["name"])
 
     return table_base, key
 
@@ -91,31 +95,65 @@ def decrypt_table_arm32(r2, tableinit_fn, key):
 # ---------------------------------------------------
 def extract_cnc_arm32(r2):
     cnc = None
-    baddr = r2.cmdj("ij").get("bin", {}).get("baddr")
-    instrs = r2.cmdj("aoj 100 @ main")
-    last_instr = None
-    for i in instrs:
-        if (
-            i["mnemonic"] == "push" and
-            i["opex"]["operands"][0]["type"] == "imm" and
-            i["opex"]["operands"][0]["value"] == 5 and
-            last_instr["mnemonic"] == "push" and
-            last_instr["opex"]["operands"][0]["type"] == "imm" and
-            last_instr["opex"]["operands"][0]["value"] >= baddr
-        ):
-            anti_gdb_entry = last_instr["opex"]["operands"][0]["value"]
-            resolve_cnc_mov = r2.cmdj(f"aoj 1 @ {anti_gdb_entry}")[0]
-            resolve_cnc_fn_addr = resolve_cnc_mov["opex"]["operands"][1]["value"]
-            resolve_cnc_instrs = r2.cmdj(f"aoj 20 @ {resolve_cnc_fn_addr}")
-            for _i in resolve_cnc_instrs:
+    resolve_cnc_addr = None
+
+    try:
+        instrs = r2.cmdj("aoj 100 @ main")
+        # we will be looking for the asm sequence
+        # ldr r1, aav.XXXXXX
+        # mov r0, 5
+        # bl signal
+        # as the signal handler for signum 5 is the responsible 
+        # of resolving the cnc addr
+        for i in instrs:
+            if (
+                # find a ldr r1, aav.XXXXXXXX
+                i["mnemonic"] == "ldr" and
+                i["opex"]["operands"][0]["type"] == "reg" and
+                i["opex"]["operands"][0]["value"] == "r1" and
+                ", aav." in i["disasm"]
+            ):
+                # check that the next instruction is a mov r0, 5
+                i2 = r2.cmdj(f"aoj 1 @ {i['addr'] + i['size']}")[0]
+                if i2["disasm"] != "mov r0, 5":
+                    continue
+
+                # after that we must find a bl signal
+                i3 = r2.cmdj(f"aoj 1 @ {i2['addr'] + i2['size']}")[0]
+                if i3["mnemonic"] != "bl":
+                    continue
+
+                # we have found the sequence
+                # the handler just sets a global var
+                # to the correct function pointer
+                handler_fn_addr = i["disasm"].split(", aav.")[1]
+                handler_fn = r2.cmdj(f"aoj 1 @ {handler_fn_addr}")[0]
+                if handler_fn["mnemonic"] != "ldr" or ", aav." not in handler_fn["disasm"]:
+                    continue
+
+                resolve_cnc_addr = handler_fn["disasm"].split(", aav.")[1]
+                break
+
+        if resolve_cnc_addr:
+            instrs = r2.cmdj(f"aoj 15 @ {resolve_cnc_addr}")
+            skip = True
+            for i in instrs:
                 if (
-                    _i["mnemonic"] == "mov" and
-                    _i["opex"]["operands"][0]["type"] == "mem" and
-                    _i["opex"]["operands"][1]["type"] == "imm" and
-                    _i["opex"]["operands"][1]["value"] >= baddr
+                    i["mnemonic"] == "ldr" and
+                    ", [0x" in i["disasm"] and
+                    i["opex"]["operands"][0]["type"] == "reg" and
+                    i["opex"]["operands"][1]["type"] == "mem" and
+                    i["opex"]["operands"][1]["base"] == "pc"
                 ):
-                    cnc_addr = _i["opex"]["operands"][1]["value"]
-                    cnc = r2.cmd(f"ps @ {cnc_addr}")
-                    break
-        last_instr = i
+                    if skip:
+                        # the second ldr reg,[0xXXXXXX] has the cnc data
+                        skip = False
+                        continue
+
+                    cnc_addr = i["addr"] + i["opex"]["operands"][1]["disp"] + 8
+                    cnc = bytes(r2.cmdj(f"pxj 4 @ {cnc_addr}"))
+                    # int to readable ip
+                    cnc = str(ipaddress.ip_address(cnc))
+    except:
+        log.exception("Exception extracting CnC from main")
     return cnc

@@ -88,7 +88,7 @@ def extract_cnc_x86(r2):
                     _i["opex"]["operands"][1]["value"] >= baddr
                 ):
                     cnc_addr = _i["opex"]["operands"][1]["value"]
-                    cnc = r2.cmd(f"ps @ {cnc_addr}")
+                    cnc = r2.cmd(f"ps @ {cnc_addr}").strip()
                     break
         last_instr = i
     return cnc

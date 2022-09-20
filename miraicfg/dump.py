@@ -185,7 +185,7 @@ def dump_mirai(fpath):
 
     r2.quit()
     if cfg:
-        log.info("%s: Configuration dumped: %s", fpath, cfg)
+        log.debug("%s: Configuration dumped: %s", fpath, cfg)
     else:
         log.warning("%s: Configuration could not be dumped for refered file", fpath)
 
