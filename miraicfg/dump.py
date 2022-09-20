@@ -166,6 +166,7 @@ def dump_mirai(fpath):
     bininfo = r2.cmdj("ij")
     arch = bininfo.get("bin", {}).get("arch")
     # Architecture-dependant data extraction
+    # X86
     if arch == "x86":
         cfg["cnc"] = extract_cnc_x86(r2)
         table_base, key = extract_enc_values_x86(r2, enc_fns[0])
@@ -173,7 +174,8 @@ def dump_mirai(fpath):
         if key:
             cfg["strings_table"] = decrypt_table_x86(r2, table_init, key)
 
-    elif arch == "arm" and bininfo.get("bin", {}).get("bits"):
+    # ARM32
+    elif arch == "arm" and bininfo.get("bin", {}).get("bits") == 32:
         cfg["cnc"] = extract_cnc_arm32(r2)
         table_base, key = extract_enc_values_arm32(r2, enc_fns[0])
         cfg["key"] = key

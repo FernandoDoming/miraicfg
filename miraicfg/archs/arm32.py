@@ -2,6 +2,7 @@ import struct
 import logging
 import traceback
 import ipaddress
+import re
 from .common import decode
 
 logging.basicConfig(level=logging.INFO)
@@ -127,18 +128,33 @@ def extract_cnc_arm32(r2):
                 # the handler just sets a global var
                 # to the correct function pointer
                 handler_fn_addr = i["disasm"].split(", aav.")[1]
+                log.debug("Found signum 5 handler: %s", handler_fn_addr)
                 handler_fn = r2.cmdj(f"aoj 1 @ {handler_fn_addr}")[0]
                 if handler_fn["mnemonic"] != "ldr" or ", aav." not in handler_fn["disasm"]:
                     continue
 
                 resolve_cnc_addr = handler_fn["disasm"].split(", aav.")[1]
+                log.debug("Found resolve_cnc_addr: %s", resolve_cnc_addr)
                 break
 
         if resolve_cnc_addr:
             instrs = r2.cmdj(f"aoj 15 @ {resolve_cnc_addr}")
             skip = True
             for i in instrs:
+                # if we find a ldr <reg>, <str> thats our CnC
+                ldr_ip_pattern = re.compile(r"^ldr r\d+, str\.(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$")
                 if (
+                    i["mnemonic"] == "ldr" and
+                    ", str." in i["disasm"] and
+                    (m := ldr_ip_pattern.match(i["disasm"]))
+                ):
+                    cnc = m.group(1)
+                    log.debug("Found CnC info in instruction %s", i["disasm"])
+                    break
+
+                # else we may find a ldr of a referenced 4 byte value
+                # which should be the encoded IP address of the CnC
+                elif (
                     i["mnemonic"] == "ldr" and
                     ", [0x" in i["disasm"] and
                     i["opex"]["operands"][0]["type"] == "reg" and
