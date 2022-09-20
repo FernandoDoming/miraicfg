@@ -185,6 +185,12 @@ def dump_mirai(fpath):
 
     r2.quit()
     if cfg:
+        for _str in cfg.get("strings_table", []):
+            pattern = re.compile(r"^\/bin\/busybox (\w+)\x00$")
+            if m := pattern.match(_str):
+                cfg["botnet"] = m.group(1)
+                break
+
         log.debug("%s: Configuration dumped: %s", fpath, cfg)
     else:
         log.warning("%s: Configuration could not be dumped for refered file", fpath)
