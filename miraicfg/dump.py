@@ -5,10 +5,11 @@ import r2pipe
 import logging
 import hashlib
 import struct
+import traceback
 
 from .utils.cmdline import green, red
 
-log = logging.getLogger("identikit.witness.mirai_config")
+log = logging.getLogger("miraicfg.main")
 log.setLevel(logging.INFO)
 
 def main():
@@ -21,13 +22,20 @@ def main():
         action = "store_true"
     )
     parser.add_argument(
+        "-q", "--quiet",
+        help = "Quiet mode",
+        action = "store_true"
+    )
+    parser.add_argument(
         "-o", "--output",
-        help = "Output file (default: None)",
+        help = "Output file (default: stdout)",
         default = None
     )
     args = parser.parse_args()
     if args.v:
         log.setLevel(logging.DEBUG)
+    elif args.quiet:
+        log.setLevel(logging.WARNING)
 
     configs = {}
     for file in args.files:
@@ -39,7 +47,9 @@ def main():
 
     if args.output:
         with open(args.output, "w") as f:
-            f.write(json.dumps(configs))
+            f.write(json.dumps(configs, indent=4))
+    else:
+        print(json.dumps(configs, indent=4))
 
 # ---------------------------------------------------
 def decode(key, enc_str):
@@ -121,22 +131,26 @@ def dump_mirai(fpath):
     r2.cmd("aaaa")
     enc_fns = identify_mirai_enc_fns(r2)
     if not enc_fns or len(enc_fns) != 2:
-        print(red("[-]") + " Could not determine Mirai's encryption functions")
+        log.warning(
+            "%s: Could not determine Mirai's encryption functions",
+            fpath
+        )
         return None
 
-    print(
-        green("[+]") +
-        f" Mirai's encryption function found: {enc_fns[0]['name']}, {enc_fns[1]['name']}"
+    log.info(
+        "%s: Mirai's encryption function found: %s, %s",
+        fpath, enc_fns[0]['name'], enc_fns[1]['name']
     )
     table_init = identify_mirai_table_init_fn(r2)
     if not table_init:
-        print(f"{red('[-]')} Could not find Mirai's table_init function")
+        log.warning("%s: Could not find Mirai's table_init function", fpath)
         return None
 
-    print(f"{green('[+]')} table_init found: {table_init['name']}")
+    log.info("%s: table_init found: %s", fpath, table_init['name'])
 
     bininfo = r2.cmdj("ij")
     arch = bininfo.get("bin", {}).get("arch")
+    # Architecture-dependant data extraction
     if arch == "x86":
         cfg["cnc"] = extract_cnc_x86(r2)
         table_base, key = extract_enc_values_x86(r2, enc_fns[0])
@@ -152,13 +166,13 @@ def dump_mirai(fpath):
             cfg["strings_table"] = decrypt_table_arm32(r2, table_init, key)
 
     else:
-        print(f"{red('[-]')} Architecture {arch} not supported")
+        log.warning("%s: Architecture %s not supported", fpath, arch)
 
     r2.quit()
     if cfg:
-        print(f"{green('[+]')} Configuration dumped: {cfg}")
+        log.info("%s: Configuration dumped: %s", fpath, cfg)
     else:
-        print(f"{red('[-]')} Configuration could not be dumped for file {fpath}")
+        log.warning("%s: Configuration could not be dumped for refered file", fpath)
 
     return cfg
 
@@ -273,29 +287,60 @@ def extract_enc_values_arm32(r2, enc_fn):
             i["opex"]["operands"][1]["type"] == "mem" and
             i["opex"]["operands"][1]["base"] == "pc"
         ):
-            key_addr = i["addr"] + 8 + i["opex"]["operands"][1]["disp"]
-            key = bytes(r2.cmdj(f"pxj 4 @ {key_addr}"))
+            key_ptr_ptr = i["addr"] + 8 + i["opex"]["operands"][1]["disp"]
+            key_ptr = bytes(r2.cmdj(f"pxj 4 @ {key_ptr_ptr}"))
+            # Parse as little-endian 32 bit unsinged int
+            key_ptr = struct.unpack("<I", key_ptr)[0]
+            # I think the +4 in the line below is a r2 bug
+            # however it may be, the addr read previously needs to be
+            # offsetted by +4 to read the correct key in r2 (but not in IDA)
+            key = bytes(r2.cmdj(f"pxj 4 @ {key_ptr + 4}"))
             key = struct.unpack("<I", key)[0]
-            breakpoint()
             break
 
     return table_base, key
 
 def decrypt_table_arm32(r2, tableinit_fn, key):
     strings = []
-    pseudocode = r2.cmd(f"pdg @ {tableinit_fn['offset']}")
-    pattern = re.compile(r"[\w.]+\([\w.]+, ([^\s]+), ((?:0x)?[\d]+)\);")
-    for m in pattern.finditer(pseudocode):
-        enc_str = m.group(1)
-        str_len = int(m.group(2), 16)
-        if enc_str[0] != "\"":
-            enc_str = bytes(r2.cmdj(f"pxj {str_len} @ {enc_str}"))
-        else:
-            enc_str = bytes(enc_str[1:-1], "ascii")
-        dec_str = decode(key, enc_str)
-        strings.append(dec_str)
-        log.debug("Decrypted string: %s", dec_str)
+    instrs = r2.cmdj(f"aoj {tableinit_fn['ninstrs']} @ {tableinit_fn['offset']}")
+    str_len = 0
+    for i in instrs:
+        if (
+            i["mnemonic"] == "mov" and
+            i["opex"]["operands"][1]["type"] == "imm"
+        ):
+            # The string length is always in the last mov rX,<imm value>
+            # before loading the string. As such, we save the last mov observed
+            # and use it when we identify a string
+            str_len = i["opex"]["operands"][1]["value"]
+            continue
 
+        if (
+            i["mnemonic"] == "ldr" and
+            i["opex"]["operands"][0]["type"] == "reg" and
+            (", aav." in i["disasm"] or ", str." in i["disasm"])
+        ):
+            # These instructions reference the strings
+            try:
+                str_addr = None
+                if ", aav." in i["disasm"]:
+                    str_addr = int(i["disasm"].split(", aav.")[1], 16)
+                else:
+                    str_addr = i["disasm"].split(", ")[1]
+                log.debug("Got an encrypted_string - addr: %s, len: %d", str_addr, str_len)
+                enc_str = bytes(r2.cmdj(f"pxj {str_len} @ {str_addr}"))
+                dec_str = decode(key, enc_str)
+                log.debug("Decoded string is %s", dec_str)
+                strings.append(dec_str)
+
+            except Exception as e:
+                log.warning(
+                    "Error obtaining str from instruction %s: %s",
+                    i,
+                    traceback.format_exception(
+                        etype=type(e), value=e, tb=e.__traceback__
+                    )
+                )
     return strings
 
 def extract_cnc_arm32(r2):
