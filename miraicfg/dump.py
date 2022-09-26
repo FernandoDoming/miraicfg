@@ -62,7 +62,7 @@ def main():
         nfiles = len(args.files)
         for sha256, config in configs.items():
             if config and (
-                config.get("cnc") or config.get("strings_table") or config.get("key")
+                config.get("cnc") or config.get("strings_table")
             ):
                 nsuccess += 1
             else:

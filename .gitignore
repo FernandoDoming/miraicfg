@@ -1,2 +1,5 @@
 build/
+sdist/
+dist/
 miraicfg.egg-info/
+upload_pipy.sh
